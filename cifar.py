@@ -1506,7 +1506,7 @@ def get_cifar100_5_5(seed=0,pc_valid=0.10):
     print("Loder is prepared")
     return data, taskcla[:10 // data[0]['ncla']], size, Loder, test_loader
 
-from tinyimagenet import MyTinyImagenet
+# from tinyimagenet import MyTinyImagenet
 from conf import base_path
 def get_tinyimagenet_100(seed=0,pc_valid=0.10):
     data = {}

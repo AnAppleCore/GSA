@@ -30,7 +30,7 @@ def flip_inner(x, flip1, flip2):
 def RandomFlip(x, num):
     # print(x.shape)
     #aug_x = simclr_aug(x)
-    x=simclr_aug(x)
+    # x=simclr_aug(x)
     X = []
     # print(x.shape)
 
@@ -166,8 +166,10 @@ def RandomFlip(x, num):
     # print(x.shape)
 
     # for i in range(4):
-    X.append(simclr_aug(x))
-    X.append(flip_inner(simclr_aug(x), 1, 1))
+    # X.append(simclr_aug(x))
+    X.append(x)
+    # X.append(flip_inner(simclr_aug(x), 1, 1))
+    X.append(flip_inner(x, 1, 1))
 
     X.append(flip_inner(x, 0, 1))
 

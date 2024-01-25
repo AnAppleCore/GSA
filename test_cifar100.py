@@ -16,13 +16,6 @@ import torch.optim.lr_scheduler as lr_scheduler
 from CSL.shedular import GradualWarmupScheduler
 import torchvision.transforms as transforms
 import torchvision
-np.random.seed(args.seed)
-torch.manual_seed(args.seed)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(args.seed)
-else:
-    print('[CUDA unavailable]')
-    sys.exit()
 import cifar as dataloader
 from Resnet18 import resnet18 as b_model
 from buffer import Buffer as buffer
@@ -42,13 +35,21 @@ parser.add_argument('--input_size', type=str, default=[3, 32, 32], help='(defaul
 parser.add_argument('--buffer_size', type=int, default=1000, help='(default=%(default)s)')
 parser.add_argument('--gen', type=str, default=True, help='(default=%(default)s)')
 parser.add_argument('--p1', type=float, default=0.1, help='(default=%(default)s)')
-parser.add_argument('--cuda', type=str, default='1', help='(default=%(default)s)')
+parser.add_argument('--cuda', type=int, default=1, help='(default=%(default)s)')
 parser.add_argument('--n_classes', type=int, default=512, help='(default=%(default)s)')
 parser.add_argument('--buffer_batch_size', type=int, default=64, help='(default=%(default)s)')
 args = parser.parse_args()
+torch.cuda.set_device(args.cuda)
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(args.seed)
+else:
+    print('[CUDA unavailable]')
+    sys.exit()
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # ignore warning
-os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda  # use gpu0,1
+# os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # ignore warning
+# os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda  # use gpu0,1
 oop = 4
 print('=' * 100)
 print('Arguments =')
@@ -67,8 +68,10 @@ Basic_model = b_model(num_class_per_task).cuda()
 llabel = {}
 Optimizer = Adam(Basic_model.parameters(), lr=0.001, betas=(0.9, 0.99),
                  weight_decay=1e-4)  # SGD(Basic_model.parameters(), lr=0.02, momentum=0.9)
-from apex import amp
-Basic_model, Optimizer = amp.initialize(Basic_model, Optimizer,opt_level="O1")
+# from apex import amp
+from torch.cuda.amp import autocast, GradScaler
+# Basic_model, Optimizer = amp.initialize(Basic_model, Optimizer,opt_level="O1")
+scaler = GradScaler()
 hflip = TL.HorizontalFlipLayer().cuda()
 cutperm = TL.CutPerm().cuda()
 with torch.no_grad():
@@ -134,152 +137,155 @@ for run in range(1):
                         class_holder.append(Y[j].detach())
                         class_prototype[Y[j].detach()] = 0
                         new_class_holder.append(Y[j].detach())
-
-                Optimizer.zero_grad()
-                # if args.cuda:
-                x, y = x.cuda(), y.cuda()
-                ori_x = x.detach()
-                ori_y = y.detach()
-                x = x.requires_grad_()
-
-                if batch_idx==0&task_id==0:
-                    cur_x, cur_y,_ = torch.zeros(1),torch.zeros(1),torch.zeros(1)#,None,None#buffero.onlysample(22, task=task_id)
-                else:
-
-                    cur_x, cur_y, _,_ = buffero.onlysample(22, task=task_id)
-                if len(cur_x.shape) > 3:
-                    x = torch.cat((x, cur_x), dim=0)
-                    y = torch.cat((y, cur_y))
-
-                if not buffero.is_empty():
-
-                    buffer_batch_size = 64
-
-                    # x = x.requires_grad_()
-                    x = RandomFlip(x, flip_num)
-                    y = y.repeat(flip_num)
+                with autocast():
+                    Optimizer.zero_grad()
+                    # if args.cuda:
+                    x, y = x.cuda(), y.cuda()
+                    ori_x = x.detach()
+                    ori_y = y.detach()
                     x = x.requires_grad_()
-                    hidden_pred = Basic_model.f_train(simclr_aug(x))
-                    pred_y = Basic_model.linear(hidden_pred)
-                    t = num_class_per_task#len(new_class_holder)
-                    if task_id>0:
-                        pred_y_new = pred_y[:, -t:]#torch.cat([Basic_model.linear(hidden_pred)[:, :-t].data.detach(),pred_y[:, -t:]],dim=1)
-                        loss_balance = (pred_y[:,:-t]**2).mean()
+
+                    if batch_idx==0&task_id==0:
+                        cur_x, cur_y,_ = torch.zeros(1),torch.zeros(1),torch.zeros(1)#,None,None#buffero.onlysample(22, task=task_id)
                     else:
-                        pred_y_new=pred_y
-                        loss_balance=0
-                    min_y = min(new_class_holder)
-                    y_new = y - num_class_per_task*i#min_y
 
-                    num_x=ori_y.size()[0]
-                    rate=len(new_class_holder)/len(class_holder)
-                    #balance sampling
-                    mem_x, mem_y, logits, bt = buffero.sample(int(buffer_batch_size*(1-rate))*1, exclude_task=task_id)
-
-                    index_x=ori_x
-                    index_y=ori_y
+                        cur_x, cur_y, _,_ = buffero.onlysample(22, task=task_id)
                     if len(cur_x.shape) > 3:
-                        index_x = torch.cat((index_x, cur_x), dim=0)
-                        index_y = torch.cat((index_y, cur_y))
+                        x = torch.cat((x, cur_x), dim=0)
+                        y = torch.cat((y, cur_y))
 
-                    all_x = torch.cat((mem_x, index_x), dim=0)
-                    all_y = torch.cat((mem_y, index_y))
+                    if not buffero.is_empty():
 
-                    mem_x = torch.cat((mem_x[:int(buffer_batch_size*(1-rate))],index_x[:int(buffer_batch_size*rate)]),dim=0)
-                    mem_y = torch.cat((mem_y[:int(buffer_batch_size*(1-rate))],index_y[:int(buffer_batch_size*rate)]))
-                    logits = torch.cat((logits[:int(buffer_batch_size*(1-rate))],Basic_model.f_train(index_x[:int(buffer_batch_size*rate)])),dim=0)
-                    index = torch.randperm(mem_y.size()[0])
-                    mem_x=mem_x[index][:]
-                    mem_y=mem_y[index][:]
-                    logits=logits[index][:]
+                        buffer_batch_size = 64
 
-                    mem_y = mem_y.reshape(-1)
+                        # x = x.requires_grad_()
+                        x = RandomFlip(x, flip_num)
+                        y = y.repeat(flip_num)
+                        x = x.requires_grad_()
+                        hidden_pred = Basic_model.f_train(simclr_aug(x))
+                        pred_y = Basic_model.linear(hidden_pred)
+                        t = num_class_per_task#len(new_class_holder)
+                        if task_id>0:
+                            pred_y_new = pred_y[:, -t:]#torch.cat([Basic_model.linear(hidden_pred)[:, :-t].data.detach(),pred_y[:, -t:]],dim=1)
+                            loss_balance = (pred_y[:,:-t]**2).mean()
+                        else:
+                            pred_y_new=pred_y
+                            loss_balance=0
+                        min_y = min(new_class_holder)
+                        y_new = y - num_class_per_task*i#min_y
 
-                    mem_x = mem_x.requires_grad_()
-                    hidden = Basic_model.f_train(mem_x)
-                    mem_x = RandomFlip(mem_x, flip_num)
-                    mem_y = mem_y.repeat(flip_num)
-                    y_pred = Basic_model.forward(mem_x)
-                    y_pred_hidden=Basic_model.f_train(mem_x)
-                    #Calculating Rate
-                    y_pred_new = y_pred
-                    loss_only=0
-                    exp_new = torch.exp(y_pred_new)
+                        num_x=ori_y.size()[0]
+                        rate=len(new_class_holder)/len(class_holder)
+                        #balance sampling
+                        mem_x, mem_y, logits, bt = buffero.sample(int(buffer_batch_size*(1-rate))*1, exclude_task=task_id)
 
-                    exp_new = exp_new# * Negative_matrix
-                    exp_new_sum = torch.sum(exp_new, dim=1)
-                    logits_new = (exp_new / exp_new_sum.unsqueeze(1))
-                    category_matrix_new = torch.zeros(logits_new.shape)
-                    for i_v in range(int(logits_new.shape[0])):
-                        category_matrix_new[i_v][mem_y[i_v]] = 1
+                        index_x=ori_x
+                        index_y=ori_y
+                        if len(cur_x.shape) > 3:
+                            index_x = torch.cat((index_x, cur_x), dim=0)
+                            index_y = torch.cat((index_y, cur_y))
 
-                    positive_prob = torch.zeros(logits_new.shape)
-                    false_prob = deepcopy(logits_new.detach())
-                    for i_t in range(int(logits_new.shape[0])):
-                        false_prob[i_t][mem_y[i_t]] = 0
-                        positive_prob[i_t][mem_y[i_t]] = logits_new[i_t][mem_y[i_t]].detach()
-                    if negative_logits_sum is None:
-                        negative_logits_sum = torch.sum(false_prob, dim=0)
-                        positive_logits_sum = torch.sum(positive_prob, dim=0)
-                        if i == 0:
-                            Category_sum = torch.sum(category_matrix_new, dim=0)
+                        all_x = torch.cat((mem_x, index_x), dim=0)
+                        all_y = torch.cat((mem_y, index_y))
+
+                        mem_x = torch.cat((mem_x[:int(buffer_batch_size*(1-rate))],index_x[:int(buffer_batch_size*rate)]),dim=0)
+                        mem_y = torch.cat((mem_y[:int(buffer_batch_size*(1-rate))],index_y[:int(buffer_batch_size*rate)]))
+                        logits = torch.cat((logits[:int(buffer_batch_size*(1-rate))],Basic_model.f_train(index_x[:int(buffer_batch_size*rate)])),dim=0)
+                        index = torch.randperm(mem_y.size()[0])
+                        mem_x=mem_x[index][:]
+                        mem_y=mem_y[index][:]
+                        logits=logits[index][:]
+
+                        mem_y = mem_y.reshape(-1)
+
+                        mem_x = mem_x.requires_grad_()
+                        hidden = Basic_model.f_train(mem_x)
+                        mem_x = RandomFlip(mem_x, flip_num)
+                        mem_y = mem_y.repeat(flip_num)
+                        y_pred = Basic_model.forward(mem_x)
+                        y_pred_hidden=Basic_model.f_train(mem_x)
+                        #Calculating Rate
+                        y_pred_new = y_pred
+                        loss_only=0
+                        exp_new = torch.exp(y_pred_new)
+
+                        exp_new = exp_new# * Negative_matrix
+                        exp_new_sum = torch.sum(exp_new, dim=1)
+                        logits_new = (exp_new / exp_new_sum.unsqueeze(1))
+                        category_matrix_new = torch.zeros(logits_new.shape)
+                        for i_v in range(int(logits_new.shape[0])):
+                            category_matrix_new[i_v][mem_y[i_v]] = 1
+
+                        positive_prob = torch.zeros(logits_new.shape)
+                        false_prob = deepcopy(logits_new.detach())
+                        for i_t in range(int(logits_new.shape[0])):
+                            false_prob[i_t][mem_y[i_t]] = 0
+                            positive_prob[i_t][mem_y[i_t]] = logits_new[i_t][mem_y[i_t]].detach()
+                        if negative_logits_sum is None:
+                            negative_logits_sum = torch.sum(false_prob, dim=0)
+                            positive_logits_sum = torch.sum(positive_prob, dim=0)
+                            if i == 0:
+                                Category_sum = torch.sum(category_matrix_new, dim=0)
+                            else:
+                                Category_sum += torch.sum(category_matrix_new, dim=0)  # .cuda()
+
+                            category_sum = torch.sum(category_matrix_new, dim=0)
                         else:
                             Category_sum += torch.sum(category_matrix_new, dim=0)  # .cuda()
-
-                        category_sum = torch.sum(category_matrix_new, dim=0)
-                    else:
-                        Category_sum += torch.sum(category_matrix_new, dim=0)  # .cuda()
-                        negative_logits_sum += torch.sum(false_prob, dim=0)
-                        positive_logits_sum += torch.sum(positive_prob, dim=0)
-                        category_sum += torch.sum(category_matrix_new, dim=0)
-                    if negative_logits_SUM is None:
-                        negative_logits_SUM = torch.sum(false_prob, dim=0).cuda()
-                        positive_logits_SUM = torch.sum(positive_prob, dim=0).cuda()
-                    else:
-                        negative_logits_SUM += torch.sum(false_prob, dim=0).cuda()
-                        positive_logits_SUM += torch.sum(positive_prob, dim=0).cuda()
-
-                    sum_num += int(logits_new.shape[0])
-                    if batch_idx < 5:
-                        ANT = torch.ones(len(class_holder))
-                        NT = torch.ones(len(class_holder))
-                    else:
-                        #   pdb.set_trace()
-                        ANT = (Category_sum.cuda() - positive_logits_SUM).cuda()/negative_logits_SUM.cuda() #/ (Category_sum.cuda() - positive_logits_SUM).cuda()
-                        NT = negative_logits_sum.cuda() / (category_sum - positive_logits_sum).cuda()
-
-                    ttt = torch.zeros(logits_new.shape)
-                    for qqq in range(mem_y.shape[0]):
-                        if mem_y[qqq]>=len(ANT):
-                            ttt[qqq][mem_y[qqq]] = 1
+                            negative_logits_sum += torch.sum(false_prob, dim=0)
+                            positive_logits_sum += torch.sum(positive_prob, dim=0)
+                            category_sum += torch.sum(category_matrix_new, dim=0)
+                        if negative_logits_SUM is None:
+                            negative_logits_SUM = torch.sum(false_prob, dim=0).cuda()
+                            positive_logits_SUM = torch.sum(positive_prob, dim=0).cuda()
                         else:
-                            ttt[qqq][mem_y[qqq]] = 2 / (1+torch.exp(1-(ANT[mem_y[qqq]])))
+                            negative_logits_SUM += torch.sum(false_prob, dim=0).cuda()
+                            positive_logits_SUM += torch.sum(positive_prob, dim=0).cuda()
 
-                    loss_n=-torch.sum(torch.log(logits_new)*ttt.cuda())/mem_y.shape[0]
-                    loss =2* loss_n + 1 * F.cross_entropy(
-                        pred_y_new, y_new)#+loss_balance#+2*loss_sim_r+loss_sim1#+loss_dif#+loss_old#+2*loss_only
+                        sum_num += int(logits_new.shape[0])
+                        if batch_idx < 5:
+                            ANT = torch.ones(len(class_holder))
+                            NT = torch.ones(len(class_holder))
+                        else:
+                            #   pdb.set_trace()
+                            ANT = (Category_sum.cuda() - positive_logits_SUM).cuda()/negative_logits_SUM.cuda() #/ (Category_sum.cuda() - positive_logits_SUM).cuda()
+                            NT = negative_logits_sum.cuda() / (category_sum - positive_logits_sum).cuda()
 
-                else:
+                        ttt = torch.zeros(logits_new.shape)
+                        for qqq in range(mem_y.shape[0]):
+                            if mem_y[qqq]>=len(ANT):
+                                ttt[qqq][mem_y[qqq]] = 1
+                            else:
+                                ttt[qqq][mem_y[qqq]] = 2 / (1+torch.exp(1-(ANT[mem_y[qqq]])))
 
-                    x = RandomFlip(x, flip_num)
-                    y = y.repeat(flip_num)
-                    x = x.requires_grad_()
-                    hidden_pred = Basic_model.f_train(simclr_aug(x))
-                    pred_y = Basic_model.linear(hidden_pred)
+                        loss_n=-torch.sum(torch.log(logits_new)*ttt.cuda())/mem_y.shape[0]
+                        loss =2* loss_n + 1 * F.cross_entropy(
+                            pred_y_new, y_new)#+loss_balance#+2*loss_sim_r+loss_sim1#+loss_dif#+loss_old#+2*loss_only
 
-                    t = num_class_per_task#len(new_class_holder)
-                    pred_y_new = pred_y[:, -t:]
-                    min_y = num_class_per_task*i#min(new_class_holder)
-                    y_new = y - min_y
+                    else:
 
-                    loss = F.cross_entropy(pred_y_new, y_new)
+                        x = RandomFlip(x, flip_num)
+                        y = y.repeat(flip_num)
+                        x = x.requires_grad_()
+                        hidden_pred = Basic_model.f_train(simclr_aug(x))
+                        pred_y = Basic_model.linear(hidden_pred)
+
+                        t = num_class_per_task#len(new_class_holder)
+                        pred_y_new = pred_y[:, -t:]
+                        min_y = num_class_per_task*i#min(new_class_holder)
+                        y_new = y - min_y
+
+                        loss = F.cross_entropy(pred_y_new, y_new)
                 copy_x = ori_x
                 copy_y = ori_y.unsqueeze(1)
                 copy_hidden = Basic_model.f_train(copy_x).detach()
-                with amp.scale_loss(loss, Optimizer) as scaled_loss:
-                    scaled_loss.backward()
+                # with amp.scale_loss(loss, Optimizer) as scaled_loss:
+                #     scaled_loss.backward()
              #   loss.backward()
-                Optimizer.step()
+                # Optimizer.step()
+                scaler.scale(loss).backward()
+                scaler.step(Optimizer)
+                scaler.update()
 
 
                 buffero.add_reservoir(x=copy_x.detach(), y=copy_y.squeeze(1).detach(), logits=copy_hidden.float().detach(),
