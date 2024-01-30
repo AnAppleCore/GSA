@@ -610,7 +610,7 @@ def Rotation(x, oop):
 
     return torch.cat((X, torch.rot90(X, 1, (2, 3)), torch.rot90(X, 2, (2, 3)), torch.rot90(X, 3, (2, 3)),X2,torch.rot90(X2, 1, (2, 3))), dim=0)[
            :num * oop]
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 import numpy as np
 def imshow(img):
     img=img/2+0.5

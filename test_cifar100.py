@@ -1,30 +1,19 @@
-import ipaddress
 import sys, argparse
 import numpy as np
+import os
 import torch
-from torch.nn.functional import relu, avg_pool2d
-from buffer import Buffer
-# import utils
 import datetime
-from torch.nn.functional import relu
-import torch.nn as nn
 import torch.nn.functional as F
 from CSL import tao as TL
-from CSL import classifier as C
-from CSL.utils import normalize
-import torch.optim.lr_scheduler as lr_scheduler
-from CSL.shedular import GradualWarmupScheduler
-import torchvision.transforms as transforms
-import torchvision
 import cifar as dataloader
 from Resnet18 import resnet18 as b_model
 from buffer import Buffer as buffer
-# imagenet200 import SequentialTinyImagenet as STI
-from torch.optim import Adam, SGD  # ,SparseAdam
+from torch.optim import Adam
 import torch.nn.functional as F
 from copy import deepcopy
-import matplotlib.pyplot as plt
 from utils import *
+from torch.cuda.amp import autocast, GradScaler
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', type=int, default=0, help='(default=%(default)d)')
 parser.add_argument('--experiment', default='cifar-10', type=str, required=False, help='(default=%(default)s)')
@@ -35,29 +24,27 @@ parser.add_argument('--input_size', type=str, default=[3, 32, 32], help='(defaul
 parser.add_argument('--buffer_size', type=int, default=1000, help='(default=%(default)s)')
 parser.add_argument('--gen', type=str, default=True, help='(default=%(default)s)')
 parser.add_argument('--p1', type=float, default=0.1, help='(default=%(default)s)')
-parser.add_argument('--cuda', type=int, default=1, help='(default=%(default)s)')
+parser.add_argument('--gpu', type=int, default=2, help='(default=%(default)s)')
 parser.add_argument('--n_classes', type=int, default=512, help='(default=%(default)s)')
 parser.add_argument('--buffer_batch_size', type=int, default=64, help='(default=%(default)s)')
 args = parser.parse_args()
-torch.cuda.set_device(args.cuda)
-np.random.seed(args.seed)
-torch.manual_seed(args.seed)
+
+torch.cuda.set_device(args.gpu)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(args.seed)
 else:
     print('[CUDA unavailable]')
     sys.exit()
-import os
-# os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # ignore warning
-# os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda  # use gpu0,1
-oop = 4
+
 print('=' * 100)
 print('Arguments =')
 for arg in vars(args):
     print('\t' + arg + ':', getattr(args, arg))
 print('=' * 100)
-print(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'GPU  ' + os.environ["CUDA_VISIBLE_DEVICES"])
+print(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), f'GPU {args.gpu}')
 print('=' * 100)
+
+
 ########################################################################################################################
 print('Load data...')
 num_class_per_task=10
@@ -65,26 +52,20 @@ data, taskcla, inputsize, Loder, test_loder = dataloader.get_cifar100_10(seed=ar
 print('Input size =', inputsize, '\nTask info =', taskcla)
 buffero = buffer(args).cuda()
 Basic_model = b_model(num_class_per_task).cuda()
-llabel = {}
 Optimizer = Adam(Basic_model.parameters(), lr=0.001, betas=(0.9, 0.99),
-                 weight_decay=1e-4)  # SGD(Basic_model.parameters(), lr=0.02, momentum=0.9)
-# from apex import amp
-from torch.cuda.amp import autocast, GradScaler
-# Basic_model, Optimizer = amp.initialize(Basic_model, Optimizer,opt_level="O1")
-scaler = GradScaler()
-hflip = TL.HorizontalFlipLayer().cuda()
-cutperm = TL.CutPerm().cuda()
-with torch.no_grad():
-    resize_scale = (0.6, 1.0)  # resize scaling factor,default [0.08,1]
+                 weight_decay=1e-4)
 
+
+scaler = GradScaler()
+with torch.no_grad():
+    resize_scale = (0.6, 1.0)
     color_gray = TL.RandomColorGrayLayer(p=0.2).cuda()
     resize_crop = TL.RandomResizedCropLayer(scale=resize_scale, size=[32, 32, 3]).cuda()
-    simclr_aug = transform = torch.nn.Sequential(color_gray, resize_crop,
-        )
+    simclr_aug = transform = torch.nn.Sequential(color_gray, resize_crop)
 
 Max_acc = []
 print('=' * 100)
-print(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'GPU  ' + os.environ["CUDA_VISIBLE_DEVICES"])
+print(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), f'GPU {args.gpu}')
 print('=' * 100)
 class_holder = []
 class_prototype = {}
@@ -94,7 +75,6 @@ negative_logits_SUM = None
 positive_logits_SUM = None
 num_SUM = 0
 Category_sum=None
-import pdb
 #pdb.set_trace()
 for run in range(1):
     # rank = torch.randperm(len(Loder))
@@ -128,7 +108,6 @@ for run in range(1):
                 num_d += x.shape[0]
                 if num_d % 5000 == 0:
                     print(num_d, num_d / 10000)
-                llabel[i] = []
 
                 Y = deepcopy(y)
                 for j in range(len(Y)):
@@ -296,13 +275,13 @@ for run in range(1):
         print('Calculating Performance')
         for j in range(i + 1):
             print("ori", rank[j].item())
-            a = test_model(Loder[rank[j].item()]['test'], j)
+            a = test_model(Basic_model, Loder[rank[j].item()]['test'], j)
             if j == i:
                 Max_acc.append(a)
             if a > Max_acc[j]:
                 Max_acc[j] = a
     print('=' * 100)
-    print(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'GPU  ' + os.environ["CUDA_VISIBLE_DEVICES"])
+    print(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), f'GPU {args.gpu}')
     print('=' * 100)
     import pdb
     test_loss = 0
@@ -325,6 +304,3 @@ for run in range(1):
             .format(
             test_loss, correct, num,
             100. * correct / num, ))
-
-
-
